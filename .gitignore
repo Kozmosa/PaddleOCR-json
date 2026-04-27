@@ -7,4 +7,5 @@
 *.zip
 *.rar
 *.7z
-other
+otherthird_party_new/
+models/

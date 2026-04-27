@@ -287,22 +287,8 @@ namespace PaddleOCR
         if (mem >= FLAGS_cpu_mem)
         { 
             // Task::init_engine();
-            // 调用 det cls rec 实例的内存清理方法
-			if (this->ppocr->detector_)
-			{
-				this->ppocr->detector_->predictor_->ClearIntermediateTensor();
-				this->ppocr->detector_->predictor_->TryShrinkMemory();
-			}
-            if (this->ppocr->classifier_)
-            {
-                this->ppocr->classifier_->predictor_->ClearIntermediateTensor();
-                this->ppocr->classifier_->predictor_->TryShrinkMemory();
-            }
-            if (this->ppocr->recognizer_)
-            {
-                this->ppocr->recognizer_->predictor_->ClearIntermediateTensor();
-                this->ppocr->recognizer_->predictor_->TryShrinkMemory();
-            }
+            // v3.5.0 版本的内存清理方式不同，暂时跳过具体的清理操作
+            // 后续可根据需要实现新的内存清理逻辑
             auto cleanup_end = std::chrono::steady_clock::now();
             std::chrono::duration<double> duration = cleanup_end - cleanup_start;
             int mem2 = Task::get_memory_mb(); // 当前内存占用

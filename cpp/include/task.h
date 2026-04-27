@@ -4,7 +4,7 @@
 #ifndef TASK_H
 #define TASK_H
 
-#include "include/nlohmann/json.hpp" // json库
+#include "json.hpp" // json库
 
 namespace PaddleOCR
 {

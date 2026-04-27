@@ -12,228 +12,271 @@
 // See the License for the specific language governing permissions and
 // limitations under the License.
 
-#include <include/args.h>
-#include <include/paddleocr.h>
+// 先包含 v3.5.0 的 ocr.h（定义全局 class PaddleOCR），避免与 namespace PaddleOCR 冲突
+#include "src/api/pipelines/ocr.h"
+#include "src/pipelines/ocr/result.h"
+#include "src/pipelines/ocr/pipeline.h"
 
-#include "auto_log/autolog.h"
+#include <include/paddleocr.h>
+#include <include/args.h>
+#include <include/utility.h>
+#include <iostream>
+#include <cstdio>
+
+#if defined(_WIN32)
+#include <process.h>
+#define GETPID() _getpid()
+#else
+#include <unistd.h>
+#define GETPID() getpid()
+#endif
 
 namespace PaddleOCR
 {
-
-    PPOCR::PPOCR()
+    // 内部实现类
+    class PPOCRImpl
     {
-        if (FLAGS_det)
-        {
-            // 使用智能指针，创建一个新的 DBDetector 对象，并将其管理权转移给 detector_
-            this->detector_.reset(new DBDetector(
-                FLAGS_det_model_dir, FLAGS_use_gpu, FLAGS_gpu_id, FLAGS_gpu_mem,
-                FLAGS_cpu_threads, FLAGS_enable_mkldnn, FLAGS_limit_type,
-                FLAGS_limit_side_len, FLAGS_det_db_thresh, FLAGS_det_db_box_thresh,
-                FLAGS_det_db_unclip_ratio, FLAGS_det_db_score_mode, FLAGS_use_dilation,
-                FLAGS_use_tensorrt, FLAGS_precision));
-        }
+    public:
+        PPOCRImpl();
+        ~PPOCRImpl() = default;
 
-        if (FLAGS_cls && FLAGS_use_angle_cls)
-        {
-            this->classifier_.reset(new Classifier(
-                FLAGS_cls_model_dir, FLAGS_use_gpu, FLAGS_gpu_id, FLAGS_gpu_mem,
-                FLAGS_cpu_threads, FLAGS_enable_mkldnn, FLAGS_cls_thresh,
-                FLAGS_use_tensorrt, FLAGS_precision, FLAGS_cls_batch_num));
+        std::vector<OCRPredictResult> ocr(cv::Mat img, bool det, bool rec, bool cls);
+
+    private:
+        ::PaddleOCR_v35 engine_;
+        static int temp_counter_;
+
+        std::string save_temp_image(const cv::Mat& img);
+        std::vector<OCRPredictResult> convert_results(
+            const std::vector<std::unique_ptr<BaseCVResult>>& results);
+    };
+
+    int PPOCRImpl::temp_counter_ = 0;
+
+    // 从路径中提取目录名作为模型名
+    static std::string extract_model_name(const std::string& path) {
+        size_t pos = path.find_last_of("/\\");
+        if (pos != std::string::npos) {
+            return path.substr(pos + 1);
         }
-        if (FLAGS_rec)
-        {
-            this->recognizer_.reset(new CRNNRecognizer(
-                FLAGS_rec_model_dir, FLAGS_use_gpu, FLAGS_gpu_id, FLAGS_gpu_mem,
-                FLAGS_cpu_threads, FLAGS_enable_mkldnn, FLAGS_rec_char_dict_path,
-                FLAGS_use_tensorrt, FLAGS_precision, FLAGS_rec_batch_num,
-                FLAGS_rec_img_h, FLAGS_rec_img_w));
-        }
+        return path;
     }
 
-    std::vector<std::vector<OCRPredictResult>> // 对一批Mat列表进行OCR
+    PPOCRImpl::PPOCRImpl()
+        : engine_([]() {
+            PaddleOCRParams params;
+
+            // 设置模型路径和名称
+            if (!FLAGS_det_model_dir.empty()) {
+                params.text_detection_model_dir = FLAGS_det_model_dir;
+                params.text_detection_model_name = extract_model_name(FLAGS_det_model_dir);
+            }
+            if (!FLAGS_rec_model_dir.empty()) {
+                params.text_recognition_model_dir = FLAGS_rec_model_dir;
+                params.text_recognition_model_name = extract_model_name(FLAGS_rec_model_dir);
+            }
+            if (!FLAGS_cls_model_dir.empty()) {
+                params.textline_orientation_model_dir = FLAGS_cls_model_dir;
+                params.textline_orientation_model_name = extract_model_name(FLAGS_cls_model_dir);
+            }
+
+            // 设置设备
+            std::string device = FLAGS_use_gpu ? "gpu:" + std::to_string(FLAGS_gpu_id) : "cpu";
+            params.device = device;
+
+            // 设置推理选项
+            params.precision = FLAGS_precision;
+            params.enable_mkldnn = FLAGS_enable_mkldnn;
+            params.cpu_threads = FLAGS_cpu_threads;
+
+            // 设置检测参数
+            params.text_det_limit_side_len = FLAGS_limit_side_len;
+            params.text_det_limit_type = FLAGS_limit_type;
+            params.text_det_thresh = static_cast<float>(FLAGS_det_db_thresh);
+            params.text_det_box_thresh = static_cast<float>(FLAGS_det_db_box_thresh);
+            params.text_det_unclip_ratio = static_cast<float>(FLAGS_det_db_unclip_ratio);
+
+            // 设置识别参数
+            if (FLAGS_rec_batch_num > 0) {
+                params.text_recognition_batch_size = FLAGS_rec_batch_num;
+            }
+
+            // 设置方向分类
+            params.use_textline_orientation = FLAGS_use_angle_cls;
+
+            // 禁用不需要的功能以保持兼容
+            params.use_doc_orientation_classify = false;
+            params.use_doc_unwarping = false;
+
+            return params;
+        }())
+    {
+    }
+
+    std::string PPOCRImpl::save_temp_image(const cv::Mat& img)
+    {
+        static const std::string TEMP_PREFIX = "/tmp/paddleocr_json_";
+        std::string temp_path = TEMP_PREFIX + std::to_string(GETPID()) + "_" +
+                                std::to_string(temp_counter_++) + ".png";
+        if (!cv::imwrite(temp_path, img)) {
+            std::cerr << "[ERROR] Failed to save temporary image: " << temp_path << std::endl;
+            return "";
+        }
+        return temp_path;
+    }
+
+    std::vector<OCRPredictResult> PPOCRImpl::convert_results(
+        const std::vector<std::unique_ptr<BaseCVResult>>& results)
+    {
+        std::vector<OCRPredictResult> ocr_results;
+
+        if (results.empty()) {
+            return ocr_results;
+        }
+
+        // 向下转型为 OCRResult
+        for (const auto& result : results) {
+            OCRResult* ocr_result = dynamic_cast<OCRResult*>(result.get());
+            if (!ocr_result) {
+                continue;
+            }
+
+            // 获取 pipeline 结果
+            const OCRPipelineResult& pipeline_result = ocr_result->GetPipelineResult();
+
+            // 转换每个识别结果
+            size_t num_results = pipeline_result.rec_texts.size();
+            for (size_t i = 0; i < num_results; ++i) {
+                OCRPredictResult res;
+                res.text = pipeline_result.rec_texts[i];
+                res.score = pipeline_result.rec_scores[i];
+
+                // 转换检测框 (rec_polys 优先，方向校正后的)
+                if (i < pipeline_result.rec_polys.size()) {
+                    const auto& poly = pipeline_result.rec_polys[i];
+                    for (const auto& pt : poly) {
+                        res.box.push_back({static_cast<int>(pt.x), static_cast<int>(pt.y)});
+                    }
+                } else if (i < pipeline_result.dt_polys.size()) {
+                    const auto& poly = pipeline_result.dt_polys[i];
+                    for (const auto& pt : poly) {
+                        res.box.push_back({static_cast<int>(pt.x), static_cast<int>(pt.y)});
+                    }
+                }
+
+                // 转换方向分类结果
+                if (i < pipeline_result.textline_orientation_angles.size()) {
+                    int angle = pipeline_result.textline_orientation_angles[i];
+                    // v3.5.0 textline_orientation 返回 0(0度) 或 1(180度)
+                    res.cls_label = angle;
+                    res.cls_score = 1.0f; // v3.5.0 不直接提供分类分数
+                } else {
+                    res.cls_label = -1;
+                    res.cls_score = 0.0f;
+                }
+
+                ocr_results.push_back(res);
+            }
+        }
+
+        // 按位置排序
+        Utility::sorted_boxes(ocr_results);
+
+        return ocr_results;
+    }
+
+    std::vector<OCRPredictResult> PPOCRImpl::ocr(cv::Mat img, bool det, bool rec, bool cls)
+    {
+        // 保存为临时文件
+        std::string temp_path = save_temp_image(img);
+        if (temp_path.empty()) {
+            return std::vector<OCRPredictResult>();
+        }
+
+        // 调用 v3.5.0 API
+        std::vector<std::unique_ptr<BaseCVResult>> results;
+
+        try {
+            results = engine_.Predict(temp_path);
+        } catch (...) {
+            // 清理临时文件
+            std::remove(temp_path.c_str());
+            return std::vector<OCRPredictResult>();
+        }
+
+        // 清理临时文件
+        std::remove(temp_path.c_str());
+
+        // 转换结果
+        std::vector<OCRPredictResult> ocr_result = convert_results(results);
+
+        // 根据 det/rec/cls 参数调整结果
+        if (!det) {
+            // 不做检测，将所有框设为整张图片
+            for (auto& res : ocr_result) {
+                res.box = {{0, 0}, {img.cols - 1, 0}, {img.cols - 1, img.rows - 1}, {0, img.rows - 1}};
+            }
+            // 如果没有结果，添加一个默认结果
+            if (ocr_result.empty()) {
+                OCRPredictResult res;
+                res.box = {{0, 0}, {img.cols - 1, 0}, {img.cols - 1, img.rows - 1}, {0, img.rows - 1}};
+                ocr_result.push_back(res);
+            }
+        }
+
+        if (!rec) {
+            // 不做识别，清空文本和分数
+            for (auto& res : ocr_result) {
+                res.text = "";
+                res.score = -1.0f;
+            }
+        }
+
+        if (!cls) {
+            // 不做分类，将分类信息设为默认值
+            for (auto& res : ocr_result) {
+                res.cls_label = -1;
+                res.cls_score = 0.0f;
+            }
+        }
+
+        return ocr_result;
+    }
+
+    // ==================== PPOCR 公共接口 ====================
+
+    PPOCR::PPOCR() : impl_(new PPOCRImpl()) {}
+    PPOCR::~PPOCR() = default;
+
+    std::vector<std::vector<OCRPredictResult>>
     PPOCR::ocr(std::vector<cv::Mat> img_list, bool det, bool rec, bool cls)
     {
         std::vector<std::vector<OCRPredictResult>> ocr_results;
 
-        if (!det)
-        { // 不需要det的流程
-            std::vector<OCRPredictResult> ocr_result;
-            ocr_result.resize(img_list.size());
-            if (cls && this->classifier_)
-            {
-                this->cls(img_list, ocr_result);
-                for (int i = 0; i < img_list.size(); i++)
-                {
-                    if (ocr_result[i].cls_label % 2 == 1 &&
-                        ocr_result[i].cls_score > this->classifier_->cls_thresh)
-                    {
-                        cv::rotate(img_list[i], img_list[i], 1);
-                    }
-                }
-            }
-            if (rec)
-            {
-                this->rec(img_list, ocr_result);
-            }
-            for (int i = 0; i < ocr_result.size(); ++i)
-            {
-                std::vector<OCRPredictResult> ocr_result_tmp;
-                ocr_result_tmp.push_back(ocr_result[i]);
-                ocr_results.push_back(ocr_result_tmp);
-            }
+        for (auto& img : img_list) {
+            ocr_results.push_back(ocr(img, det, rec, cls));
         }
-        else
-        { // 正常的det+cls+rec流程
-            for (int i = 0; i < img_list.size(); ++i)
-            {
-                std::vector<OCRPredictResult> ocr_result =
-                    this->ocr(img_list[i], true, rec, cls);
-                ocr_results.push_back(ocr_result);
-            }
-        }
+
         return ocr_results;
     }
 
-    // 对单个Mat进行OCR
-    std::vector<OCRPredictResult> PPOCR::ocr(cv::Mat img, bool det, bool rec,
-                                             bool cls)
+    std::vector<OCRPredictResult>
+    PPOCR::ocr(cv::Mat img, bool det, bool rec, bool cls)
     {
-
-        std::vector<OCRPredictResult> ocr_result;
-        std::vector<cv::Mat> img_list;
-        // det
-        if (det)
-        {
-            this->det(img, ocr_result); // 取det结果
-            // 按det结果，裁切图片
-            for (int j = 0; j < ocr_result.size(); j++)
-            {
-                cv::Mat crop_img;
-                crop_img = Utility::GetRotateCropImage(img, ocr_result[j].box);
-                img_list.push_back(crop_img);
-            }
-        }
-        else
-        {
-            // 创建一个box，大小与整张图片相同
-            std::vector<std::vector<int>> box = {{0, 0}, {img.cols - 1, 0}, {img.cols - 1, img.rows - 1}, {0, img.rows - 1}};
-            OCRPredictResult res;
-            res.box = box;
-            ocr_result.push_back(res);
-            img_list.push_back(img);
-        }
-        // cls
-        if (cls && this->classifier_)
-        {
-            this->cls(img_list, ocr_result);
-            for (int i = 0; i < img_list.size(); i++)
-            {
-                if (ocr_result[i].cls_label % 2 == 1 &&
-                    ocr_result[i].cls_score > this->classifier_->cls_thresh)
-                {
-                    cv::rotate(img_list[i], img_list[i], 1);
-                }
-            }
-        }
-        // rec
-        if (rec)
-        {
-            this->rec(img_list, ocr_result);
-        }
-        return ocr_result;
-    }
-
-    void PPOCR::det(cv::Mat img, std::vector<OCRPredictResult> &ocr_results)
-    {
-        std::vector<std::vector<std::vector<int>>> boxes;
-        std::vector<double> det_times;
-
-        this->detector_->Run(img, boxes, det_times);
-
-        for (int i = 0; i < boxes.size(); i++)
-        {
-            OCRPredictResult res;
-            res.box = boxes[i];
-            ocr_results.push_back(res);
-        }
-        // sort boex from top to bottom, from left to right
-        Utility::sorted_boxes(ocr_results);
-        this->time_info_det[0] += det_times[0];
-        this->time_info_det[1] += det_times[1];
-        this->time_info_det[2] += det_times[2];
-    }
-
-    void PPOCR::rec(std::vector<cv::Mat> img_list,
-                    std::vector<OCRPredictResult> &ocr_results)
-    {
-        std::vector<std::string> rec_texts(img_list.size(), "");
-        std::vector<float> rec_text_scores(img_list.size(), 0);
-        std::vector<double> rec_times;
-        this->recognizer_->Run(img_list, rec_texts, rec_text_scores, rec_times);
-        // output rec results
-        for (int i = 0; i < rec_texts.size(); i++)
-        {
-            ocr_results[i].text = rec_texts[i];
-            ocr_results[i].score = rec_text_scores[i];
-        }
-        this->time_info_rec[0] += rec_times[0];
-        this->time_info_rec[1] += rec_times[1];
-        this->time_info_rec[2] += rec_times[2];
-    }
-
-    void PPOCR::cls(std::vector<cv::Mat> img_list,
-                    std::vector<OCRPredictResult> &ocr_results)
-    {
-        std::vector<int> cls_labels(img_list.size(), 0);
-        std::vector<float> cls_scores(img_list.size(), 0);
-        std::vector<double> cls_times;
-        this->classifier_->Run(img_list, cls_labels, cls_scores, cls_times);
-        // output cls results
-        for (int i = 0; i < cls_labels.size(); i++)
-        {
-            ocr_results[i].cls_label = cls_labels[i];
-            ocr_results[i].cls_score = cls_scores[i];
-        }
-        this->time_info_cls[0] += cls_times[0];
-        this->time_info_cls[1] += cls_times[1];
-        this->time_info_cls[2] += cls_times[2];
+        return impl_->ocr(img, det, rec, cls);
     }
 
     void PPOCR::reset_timer()
     {
-        this->time_info_det = {0, 0, 0};
-        this->time_info_rec = {0, 0, 0};
-        this->time_info_cls = {0, 0, 0};
+        time_info_det = {0, 0, 0};
+        time_info_rec = {0, 0, 0};
+        time_info_cls = {0, 0, 0};
     }
 
     void PPOCR::benchmark_log(int img_num)
     {
-        if (this->time_info_det[0] + this->time_info_det[1] + this->time_info_det[2] >
-            0)
-        {
-            AutoLogger autolog_det("ocr_det", FLAGS_use_gpu, FLAGS_use_tensorrt,
-                                   FLAGS_enable_mkldnn, FLAGS_cpu_threads, 1, "dynamic",
-                                   FLAGS_precision, this->time_info_det, img_num);
-            autolog_det.report();
-        }
-        if (this->time_info_rec[0] + this->time_info_rec[1] + this->time_info_rec[2] >
-            0)
-        {
-            AutoLogger autolog_rec("ocr_rec", FLAGS_use_gpu, FLAGS_use_tensorrt,
-                                   FLAGS_enable_mkldnn, FLAGS_cpu_threads,
-                                   FLAGS_rec_batch_num, "dynamic", FLAGS_precision,
-                                   this->time_info_rec, img_num);
-            autolog_rec.report();
-        }
-        if (this->time_info_cls[0] + this->time_info_cls[1] + this->time_info_cls[2] >
-            0)
-        {
-            AutoLogger autolog_cls("ocr_cls", FLAGS_use_gpu, FLAGS_use_tensorrt,
-                                   FLAGS_enable_mkldnn, FLAGS_cpu_threads,
-                                   FLAGS_cls_batch_num, "dynamic", FLAGS_precision,
-                                   this->time_info_cls, img_num);
-            autolog_cls.report();
-        }
+        // v3.5.0 的 benchmark 逻辑不同，这里保持兼容
+        // TODO: 如果需要，可以实现新的 benchmark 逻辑
     }
 
 } // namespace PaddleOCR
