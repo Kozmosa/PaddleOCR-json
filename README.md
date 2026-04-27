@@ -8,7 +8,7 @@
 |                  | 凌动Atom，安腾Itanium，赛扬Celeron，奔腾Pentium |                      |
 | 推理加速库       | mkldnn 👍                                        | 无                   |
 | 识别速度         | 快（启用mkldnn加速）👍                           | 中等                 |
-| 初始化耗时       | 约0.6s                                          | 0.1s内，快 👍         |
+| 初始化耗时       | 约2.0s                                          | 0.1s内，快 👍         |
 | 组件体积（压缩） | 100MB                                           | 70MB 👍               |
 | 组件体积（部署） | 369MB                                           | 80MB 👍               |
 | CPU占用          | 较高                                            | 较低，对低配机器友好 |
@@ -20,13 +20,13 @@
 
 > 支持： **Win7 x64**、**Linux x64**、[Docker](cpp/README-docker.md)
 
-这是一个基于 [PaddleOCR v2.6](https://github.com/PaddlePaddle/PaddleOCR/tree/release/2.6) 及 [v2.8](https://github.com/PaddlePaddle/PaddleOCR/tree/release/2.8) cpp_infer 的离线图片OCR文字识别程序，可快速让你的程序拥有OCR能力。它可以作为一个子进程被上层程序调用，也可以作为一个单独的进程通过TCP调用。本项目提供了Python等语言的API，你可以无视技术细节，通过两行代码使用它。
+这是一个基于 [PaddleOCR v3.5.0](https://github.com/PaddlePaddle/PaddleOCR) cpp_infer 的离线图片OCR文字识别程序，可快速让你的程序拥有OCR能力。它可以作为一个子进程被上层程序调用，也可以作为一个单独的进程通过TCP调用。本项目提供了Python等语言的API，你可以无视技术细节，通过两行代码使用它。
 
 本项目旨在提供一个封装好的OCR引擎组件，使得没有C++编程基础的开发者也可以用别的语言来简单地调用OCR，享受到更快的运行效率、更便捷的打包&部署手段。
 
 - **方便** ：部署方便，解压即用，无需安装和配置环境，无需联网。发布方便，可嵌入程序包也可作为外挂组件。
 - **高速** ：基于 PPOCR C++ 版引擎，识别效率高于Python版本PPOCR及其他一些由Python处理任务流的OCR引擎。
-- **精准** ：附带 PPOCR-v3 / v4 识别库，对非常规字形（手写、艺术字、小字、杂乱背景等）也具有不错的识别率。
+- **精准** ：附带 PPOCR-v5 识别库，对非常规字形（手写、艺术字、小字、杂乱背景等）也具有不错的识别率。
 - **灵活** ：可以以多种方式指定OCR任务，支持识别本地图片路径、Base64编码的图片、TCP局域网调用。
 
 **应用：[Umi-OCR 批量图片转文字工具](https://github.com/hiroi-sora/Umi-OCR)**
@@ -200,7 +200,7 @@ argument = {
 ocr = GetOcrApi(enginePath, argument)
 ```
 
-本项目支持 PP-OCR 系列官方 V2~V4 模型，或自己训练的符合PP规范的模型。更多 PP-OCR 系列官方模型下载： https://github.com/PaddlePaddle/PaddleOCR/blob/main/doc/doc_ch/models_list.md
+本项目支持 PP-OCR 系列官方 V3~V5 模型。模型需使用 PaddleOCR v3.5.0 的 YAML 配置格式。更多 PP-OCR 系列官方模型下载： https://github.com/PaddlePaddle/PaddleOCR/blob/main/doc/doc_ch/models_list.md
 
 #### 删除语言库：
 
@@ -346,15 +346,9 @@ ocr = GetOcrApi(enginePath, argument)
 
 ### 项目构建指南
 
-#### 稳定版，基于 PP-OCR v2.6
+#### 基于 PP-OCR v3.5.0
 
-- [Windows 平台构建步骤](https://github.com/hiroi-sora/PaddleOCR-json/blob/release/1.4.1/cpp/README.md)
-- [Linux 平台构建步骤](https://github.com/hiroi-sora/PaddleOCR-json/blob/release/1.4.1/cpp/README-linux.md)
-- [Docker 部署](https://github.com/hiroi-sora/PaddleOCR-json/blob/release/1.4.1/cpp/README-docker.md)
-
-#### 开发版，基于 PP-OCR v2.8
-
-> 注：此版本基于 Paddle Inference 3.0.0 推理后端，使用带 AVX512 指令集的高端 CPU 时性能更好。普通家用 CPU 则有性能劣化，建议使用上面的稳定版。
+> 注：此版本基于 Paddle Inference 最新推理后端，支持 PP-OCRv5 模型。新增依赖 abseil-cpp、clipper、nlohmann JSON。
 
 - [Windows 平台构建步骤](cpp/README.md)
 - [Linux 平台构建步骤](cpp/README-linux.md)
@@ -377,6 +371,16 @@ ocr = GetOcrApi(enginePath, argument)
 ## 更新日志
 
 版本号链接可前往对应备份分支。
+
+#### v1.5.0 `2026.4.27`
+
+- 升级推理引擎至 PaddleOCR v3.5.0，支持 PP-OCRv5 模型。
+- 更新推理后端至 Paddle Inference 最新版本。
+- 引擎架构重构：采用 api/pipeline/module/base 分层架构。
+- 新增依赖：abseil-cpp、clipper、nlohmann JSON。
+- 支持 PIR/JSON 模型格式（`inference.json`）。
+- 对外 API 完全保持兼容（命令行、管道、TCP、JSON 输出格式）。
+- 新增 pixi 构建配置，支持可复现构建环境。
 
 #### [v1.4.1](https://github.com/hiroi-sora/PaddleOCR-json/tree/release/1.4.1) `2024.8.28`
 
